@@ -126,11 +126,14 @@ import org.eclipse.persistence.jaxb.xmlmodel.XmlTransformation.XmlReadTransforme
 import org.eclipse.persistence.jaxb.xmlmodel.XmlTransformation.XmlWriteTransformer;
 import org.eclipse.persistence.logging.AbstractSessionLog;
 import org.eclipse.persistence.logging.SessionLog;
+import org.eclipse.persistence.mappings.AttributeAccessor;
 import org.eclipse.persistence.mappings.DatabaseMapping;
 import org.eclipse.persistence.mappings.converters.Converter;
 import org.eclipse.persistence.oxm.XMLConstants;
 import org.eclipse.persistence.oxm.XMLDescriptor;
 import org.eclipse.persistence.oxm.XMLField;
+import org.eclipse.persistence.oxm.XMLMarshaller;
+import org.eclipse.persistence.oxm.XMLUnmarshaller;
 import org.eclipse.persistence.oxm.mappings.FixedMimeTypePolicy;
 import org.eclipse.persistence.oxm.mappings.UnmarshalKeepAsElementPolicy;
 import org.eclipse.persistence.oxm.mappings.XMLAnyAttributeMapping;
@@ -152,6 +155,7 @@ import org.eclipse.persistence.oxm.mappings.XMLTransformationMapping;
 import org.eclipse.persistence.oxm.mappings.XMLVariableXPathCollectionMapping;
 import org.eclipse.persistence.oxm.mappings.XMLVariableXPathObjectMapping;
 import org.eclipse.persistence.oxm.mappings.converters.XMLListConverter;
+import org.eclipse.persistence.oxm.mappings.converters.XMLConverter;
 import org.eclipse.persistence.oxm.mappings.nullpolicy.AbstractNullPolicy;
 import org.eclipse.persistence.oxm.mappings.nullpolicy.IsSetNullPolicy;
 import org.eclipse.persistence.oxm.mappings.nullpolicy.NullPolicy;
@@ -160,6 +164,7 @@ import org.eclipse.persistence.oxm.schema.XMLSchemaClassPathReference;
 import org.eclipse.persistence.oxm.schema.XMLSchemaReference;
 import org.eclipse.persistence.queries.AttributeGroup;
 import org.eclipse.persistence.sessions.Project;
+import org.eclipse.persistence.sessions.Session;
 
 /**
  * INTERNAL:
@@ -239,9 +244,7 @@ public class MappingsGenerator {
 
         // Generate descriptors
         for (JavaClass next : typeInfoClasses) {
-            if (!next.isEnum()) {
-                generateDescriptor(next, project);
-            }
+            generateDescriptor(next, project);
         }
         // Setup inheritance
         for (JavaClass next : typeInfoClasses) {
@@ -1605,9 +1608,11 @@ public class MappingsGenerator {
         if (referenceClassName == null){
             setTypedTextField((Field)mapping.getField());
             String defaultValue = property.getDefaultValue();
+            Converter converter = null;
             if (null != defaultValue) {
-                mapping.setConverter(new DefaultElementConverter(defaultValue));
+                converter = new DefaultElementConverter(defaultValue);
             }
+            mapping.setConverter(new EnumXMLConverter(converter));
         } else {
             mapping.setReferenceClassName(referenceClassName);
         }
@@ -2244,6 +2249,7 @@ public class MappingsGenerator {
 
         if (referenceClassName == null){
             setTypedTextField((Field)mapping.getField());
+            mapping.setConverter(new EnumXMLConverter(null));
         } else {
             mapping.setReferenceClassName(referenceClassName);
         }
@@ -2500,6 +2506,96 @@ public class MappingsGenerator {
 
         return rootMappedSuperClass;
     }
+    
+    public static class EnumXMLConverter implements XMLConverter {
+        private final Converter converter;
+
+        public EnumXMLConverter(Converter converter) {
+            this.converter = converter;
+        }
+
+        public Object convertDataValueToObjectValue(Object dataValue, Session session, XMLUnmarshaller unmarshaller) {
+            return convertDataValueToObjectValue(dataValue, session);
+        }
+
+        public Object convertObjectValueToDataValue(Object objectValue, Session session, XMLMarshaller marshaller) {
+            return convertObjectValueToDataValue(objectValue, session);
+        }
+
+        @Override
+        public Object convertObjectValueToDataValue(Object objectValue, Session session) {
+            if (converter != null) {
+                objectValue = converter.convertObjectValueToDataValue(objectValue, session);
+            }
+            return objectValue;
+        }
+
+        @Override
+        public Object convertDataValueToObjectValue(Object dataValue, Session session) {
+            if (dataValue instanceof EnumContainer) {
+                dataValue = ((EnumContainer) dataValue).getValue();
+            }
+            if (converter != null) {
+                dataValue = converter.convertDataValueToObjectValue(dataValue, session);
+            }
+            return dataValue;
+        }
+
+        @Override
+        public boolean isMutable() {
+            return false;
+        }
+
+        @Override
+        public void initialize(DatabaseMapping mapping, Session session) {
+
+        }
+    }
+
+    public static class EnumContainer {
+        private Object value;
+
+        public EnumContainer() {
+        }
+
+        public EnumContainer(Object value) {
+            this.value = value;
+        }
+
+        public Object getValue() {
+            return value;
+        }
+
+        public void setValue(Object value) {
+            this.value = value;
+        }
+    }
+
+    public static class EnumAttributeAccessor extends AttributeAccessor {
+        @Override
+        public Object getAttributeValueFromObject(Object object) throws DescriptorException {
+            return object;
+        }
+
+        @Override
+        public void setAttributeValueInObject(Object object, Object value) throws DescriptorException {
+            ((EnumContainer) object).setValue(value);
+        }
+    }
+
+    public static final class EnumInstantiationPolicy extends InstantiationPolicy {
+
+        /**
+         * Returns a new instance of this InstantiationPolicy's Descriptor's class.
+         *
+         * In this case, do nothing and return null.
+         */
+        @Override
+        public Object buildNewInstance() throws DescriptorException {
+            return new EnumContainer();
+        }
+
+    }
 
     public void generateMappings() {
         Iterator javaClasses = this.typeInfo.keySet().iterator();
@@ -2508,6 +2604,29 @@ public class MappingsGenerator {
             JavaClass javaClass = helper.getJavaClass(next);
             TypeInfo info = this.typeInfo.get(next);
             if (info.isEnumerationType()) {
+                XMLDirectMapping mapping = new XMLDirectMapping();
+                mapping.setAttributeName("value");
+                mapping.setXPath("text()");
+                QName schemaType = userDefinedSchemaTypes.get(javaClass.getQualifiedName());
+                if (schemaType == null) {
+                    schemaType = (QName) helper.getXMLToJavaTypeMap().get(javaClass);
+                }
+                ((Field)mapping.getField()).setSchemaType(schemaType);
+
+                // Try to get the actual Class
+                try {
+                    JavaClass actualJavaClass = helper.getJavaClass(next);
+                    Class actualClass =  org.eclipse.persistence.internal.helper.Helper.getClassFromClasseName(actualJavaClass.getQualifiedName(), helper.getClassLoader());
+                    mapping.setAttributeClassification(actualClass);
+                } catch (Exception e) {
+                    // Couldn't find Class (Dynamic?), so set class name instead.
+                    mapping.setAttributeClassificationName(next);
+                }
+                mapping.setAttributeAccessor(new EnumAttributeAccessor());
+                mapping.setConverter(buildJAXBEnumTypeConverter(mapping, (EnumTypeInfo)info));
+                Descriptor descriptor = info.getDescriptor();
+                descriptor.setInstantiationPolicy(new EnumInstantiationPolicy());
+                descriptor.addMapping((CoreMapping)mapping);
                 continue;
             }
             NamespaceInfo namespaceInfo = this.packageToPackageInfoMappings.get(javaClass.getPackageName()).getNamespaceInfo();
