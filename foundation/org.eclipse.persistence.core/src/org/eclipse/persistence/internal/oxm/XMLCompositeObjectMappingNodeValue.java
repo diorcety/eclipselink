@@ -263,7 +263,7 @@ public class XMLCompositeObjectMappingNodeValue extends XMLRelationshipMappingNo
                 extraNamespaces = objectBuilder.addExtraNamespacesToNamespaceResolver(descriptor, marshalRecord, session, true, false);
                 writeExtraNamespaces(extraNamespaces, marshalRecord, session);
             }
-            if(!isSelfFragment) {
+            if(!isSelfFragment && (xPathNode.getParent() == null || xPathNode.getParent().getSelfChildren() == null || !xPathNode.getParent().getSelfChildren().contains(xPathNode))) {
                 marshalRecord.addXsiTypeAndClassIndicatorIfRequired(descriptor, (Descriptor) xmlCompositeObjectMapping.getReferenceDescriptor(), (Field)xmlCompositeObjectMapping.getField(), false);
             }
 
