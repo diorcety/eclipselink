@@ -1612,7 +1612,9 @@ public class MappingsGenerator {
             if (null != defaultValue) {
                 converter = new DefaultElementConverter(defaultValue);
             }
-            mapping.setConverter(new EnumXMLConverter(converter));
+            converter = new EnumXMLConverter(converter);
+            converter = new PackageLevelConverter(typeInfo.get(descriptor.getJavaClassName()).getPackageLevelAdaptersByClass(), converter);
+            mapping.setConverter(converter);
         } else {
             mapping.setReferenceClassName(referenceClassName);
         }
@@ -2249,7 +2251,9 @@ public class MappingsGenerator {
 
         if (referenceClassName == null){
             setTypedTextField((Field)mapping.getField());
-            mapping.setConverter(new EnumXMLConverter(null));
+            Converter converter = new EnumXMLConverter(null);
+            converter = new PackageLevelConverter(typeInfo.get(descriptor.getJavaClassName()).getPackageLevelAdaptersByClass(), converter);
+            mapping.setConverter(converter);
         } else {
             mapping.setReferenceClassName(referenceClassName);
         }
@@ -2505,6 +2509,90 @@ public class MappingsGenerator {
         }
 
         return rootMappedSuperClass;
+    }
+
+    public static class PackageLevelConverter implements XMLConverter {
+        private final Map<String, XMLJavaTypeConverter> map;
+        private final Map<Class, XMLJavaTypeConverter> resolvedMap = new HashMap<Class, XMLJavaTypeConverter>();
+        private final Converter converter;
+
+        public PackageLevelConverter(Map<String, JavaClass> map, Converter converter) {
+            this.map = new HashMap<String, XMLJavaTypeConverter>();
+            for (Map.Entry<String, JavaClass> entry : map.entrySet()) {
+                this.map.put(entry.getKey(), new XMLJavaTypeConverter(entry.getValue().getName()));
+            }
+
+            this.converter = converter;
+        }
+
+        public Object convertDataValueToObjectValue(Object dataValue, Session session, XMLUnmarshaller unmarshaller) {
+            return convertDataValueToObjectValue(dataValue, session);
+        }
+
+        public Object convertObjectValueToDataValue(Object objectValue, Session session, XMLMarshaller marshaller) {
+            return convertObjectValueToDataValue(objectValue, session);
+        }
+
+        @Override
+        public Object convertObjectValueToDataValue(Object objectValue, Session session) {
+            if (objectValue != null) {
+                Class<?> aClass = objectValue.getClass();
+                for (Map.Entry<Class, XMLJavaTypeConverter> entry : resolvedMap.entrySet()) {
+                    if (entry.getKey().isAssignableFrom(aClass)) {
+                        objectValue = entry.getValue().convertObjectValueToDataValue(objectValue, session);
+                        break;
+                    }
+                }
+            }
+            if (converter != null) {
+                objectValue = converter.convertObjectValueToDataValue(objectValue, session);
+            }
+            return objectValue;
+        }
+
+        @Override
+        public Object convertDataValueToObjectValue(Object dataValue, Session session) {
+            if (converter != null) {
+                dataValue = converter.convertDataValueToObjectValue(dataValue, session);
+            }
+            if (dataValue != null) {
+                Class<?> aClass = dataValue.getClass();
+                for (Map.Entry<Class, XMLJavaTypeConverter> entry : resolvedMap.entrySet()) {
+                    if (entry.getKey().isAssignableFrom(aClass)) {
+                        dataValue = entry.getValue().convertDataValueToObjectValue(dataValue, session);
+                        break;
+                    }
+                }
+            }
+            return dataValue;
+        }
+
+        @Override
+        public boolean isMutable() {
+            return false;
+        }
+
+        @Override
+        public void initialize(DatabaseMapping mapping, Session session) {
+            for (Map.Entry<String, XMLJavaTypeConverter> entry : map.entrySet()) {
+                entry.getValue().initialize(mapping, session);
+
+                // if the adapter class is null, try the adapter class name
+                ClassLoader loader = session.getDatasourceLogin().getDatasourcePlatform().getConversionManager().getLoader();
+                Class xmlAdapterClass;
+                try {
+                    if (PrivilegedAccessHelper.shouldUsePrivilegedAccess()) {
+                        xmlAdapterClass = AccessController.doPrivileged(new PrivilegedClassForName(entry.getKey(), true, loader));
+                    } else {
+                        xmlAdapterClass = PrivilegedAccessHelper.getClassForName(entry.getKey(), true, loader);
+                    }
+                } catch (Exception e) {
+                    throw JAXBException.adapterClassNotLoaded(entry.getKey(), e);
+                }
+
+                resolvedMap.put(xmlAdapterClass, entry.getValue());
+            }
+        }
     }
     
     public static class EnumXMLConverter implements XMLConverter {
